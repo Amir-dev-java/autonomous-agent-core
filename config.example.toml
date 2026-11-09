@@ -1,0 +1,11 @@
+[workflow]
+database = "./.autonomous-eng.sqlite3"
+workspace_root = "./workspaces"
+command_timeout_seconds = 30
+max_output_bytes = 65536
+
+[provider]
+# The initial prototype uses the deterministic local demo provider.
+name = "demo"
+# Never place API keys in this file. Future providers should read them from
+# environment variables or an OS credential store and must never log them.

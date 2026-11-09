@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+worktrees/
+workspaces/
+config.toml
+dist/
+build/
+*.egg-info/
