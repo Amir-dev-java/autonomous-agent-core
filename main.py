@@ -12,6 +12,8 @@ from core.context import TaskContext
 from core.engine import WorkflowEngine
 from core.models import StepStatus, TaskRequest
 from roles.demo import DemoProvider
+from dashboard import serve
+from service import WorkflowService
 from tools.git_tools import GitTools
 from tools.runner import SafeRunner
 
@@ -27,6 +29,16 @@ def build_parser() -> argparse.ArgumentParser:
     demo.add_argument("--objective", default="Fix calculator addition and add a regression test")
     status = commands.add_parser("status", help="Show persisted task and stage status")
     status.add_argument("task_id")
+    dashboard = commands.add_parser("dashboard", help="Open the local workflow dashboard")
+    dashboard.add_argument("--host", help="Local bind address (defaults to config)")
+    dashboard.add_argument("--port", type=int, help="Local port (defaults to config)")
+    run = commands.add_parser("run", help="Implement a feature in a local Git repository")
+    run.add_argument("--repo", required=True, help="Path to a local Git repository")
+    run.add_argument("--objective", required=True, help="Feature or change to implement")
+    publish = commands.add_parser("publish", help="Push a reviewed task branch to its GitHub remote")
+    publish.add_argument("task_id")
+    publish.add_argument("--confirm", action="store_true",
+                         help="Confirm that the reviewed task branch may be pushed")
     return parser
 
 
@@ -34,6 +46,16 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         config = load_config(args.config)
+        if args.command == "dashboard":
+            service = WorkflowService(config)
+            serve(config.database, args.host or config.dashboard_host,
+                  args.port or config.dashboard_port, service.submit, service.close)
+            return 0
+        if args.command == "run":
+            service = WorkflowService(config)
+            result = service.run(TaskRequest(args.objective, args.repo))
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0 if result["status"] == StepStatus.SUCCEEDED.value else 1
         with TaskContext(config.database) as context:
             if args.command == "status":
                 task = context.get_task(args.task_id)
@@ -46,6 +68,20 @@ def main(argv: list[str] | None = None) -> int:
                                "reason": step.reason, "payload": step.payload}
                               for step in steps],
                 }, ensure_ascii=False, indent=2))
+                return 0
+
+            if args.command == "publish":
+                if not args.confirm:
+                    raise ValueError("Review the task, then run publish with --confirm to push its branch")
+                task = context.get_task(args.task_id)
+                if task.status != StepStatus.SUCCEEDED:
+                    raise ValueError("Only successfully reviewed tasks can be published")
+                git = GitTools(config.workspace_root)
+                worktree = config.workspace_root / args.task_id / "worktree"
+                branch = git.branch_name(worktree)
+                git.push_branch(worktree, branch)
+                print(json.dumps({"task_id": args.task_id, "status": "published",
+                                  "branch": branch}, ensure_ascii=False, indent=2))
                 return 0
 
             task_id = uuid.uuid4().hex[:12]

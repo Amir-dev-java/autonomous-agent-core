@@ -126,3 +126,15 @@ class TaskContext:
             "SELECT name FROM steps WHERE task_id = ? ORDER BY rowid", (task_id,)
         ).fetchall()
         return [self.get_step(task_id, row["name"]) for row in names]
+
+    def list_tasks(self, limit: int = 100) -> list[TaskRecord]:
+        if not 1 <= limit <= 500:
+            raise ValueError("Task list limit must be between 1 and 500")
+        rows = self._connection.execute(
+            "SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [TaskRecord(
+            task_id=row["task_id"], objective=row["objective"], repository=row["repository"],
+            status=StepStatus(row["status"]), report=row["report"],
+            created_at=row["created_at"], updated_at=row["updated_at"],
+        ) for row in rows]

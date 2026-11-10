@@ -13,7 +13,7 @@ dependencies = []
 autonomous-eng = "main:main"
 
 [tool.setuptools]
-py-modules = ["main", "config"]
+py-modules = ["main", "config", "dashboard", "service"]
 packages = ["core", "roles", "tools"]
 
 [tool.unittest]

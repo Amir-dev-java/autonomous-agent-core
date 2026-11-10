@@ -3,9 +3,11 @@ database = "./.autonomous-eng.sqlite3"
 workspace_root = "./workspaces"
 command_timeout_seconds = 30
 max_output_bytes = 65536
+dashboard_host = "127.0.0.1"
+dashboard_port = 8765
 
 [provider]
-# The initial prototype uses the deterministic local demo provider.
-name = "demo"
-# Never place API keys in this file. Future providers should read them from
-# environment variables or an OS credential store and must never log them.
+# All model inference runs on this computer through Ollama's localhost service.
+name = "ollama"
+model = "qwen2.5-coder:7b"
+base_url = "http://127.0.0.1:11434"

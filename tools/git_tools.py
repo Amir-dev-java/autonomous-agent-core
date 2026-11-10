@@ -81,6 +81,52 @@ class GitTools:
         self._run(("commit", "-m", "fixture baseline"), repo_path)
         return repo_path
 
+    def clone_local_repository(self, source: str | Path, destination: str | Path) -> Path:
+        """Make an isolated local clone of a user's existing Git repository."""
+        source_path = Path(source).expanduser().resolve()
+        if not source_path.is_dir() or not (source_path / ".git").exists():
+            raise GitToolError(f"Project must be a local Git repository: {source_path}")
+        destination_path = Path(destination)
+        if not destination_path.is_absolute():
+            destination_path = self.workspace_root / destination_path
+        destination_path = destination_path.resolve()
+        if not destination_path.is_relative_to(self.workspace_root):
+            raise GitToolError(f"Clone destination is outside allowed root: {destination_path}")
+        if destination_path.exists():
+            raise GitToolError(f"Clone destination already exists: {destination_path}")
+        source_status = subprocess.run(
+            (self.git, "-C", str(source_path), "status", "--porcelain"),
+            cwd=self.workspace_root, shell=False, check=False, capture_output=True,
+            text=True, encoding="utf-8", errors="replace", timeout=self.timeout_seconds,
+            env=self._git_env(),
+        )
+        if source_status.returncode != 0:
+            raise GitToolError("Could not inspect the source repository's working tree")
+        if source_status.stdout.strip():
+            raise GitToolError(
+                "Source repository has uncommitted changes. Commit or stash them before starting a task."
+            )
+        origin_url = None
+        try:
+            remote = subprocess.run(
+                (self.git, "-C", str(source_path), "remote", "get-url", "origin"),
+                cwd=self.workspace_root, shell=False, check=False, capture_output=True,
+                text=True, encoding="utf-8", errors="replace", timeout=self.timeout_seconds,
+                env=self._git_env(),
+            )
+            if remote.returncode == 0:
+                origin_url = remote.stdout.strip()
+        except subprocess.TimeoutExpired as exc:
+            raise GitToolError("Timed out while reading the project's GitHub remote") from exc
+        destination_path.parent.mkdir(parents=True, exist_ok=True)
+        self._run(("clone", "--no-hardlinks", "--", str(source_path), str(destination_path)),
+                  self.workspace_root)
+        if origin_url:
+            self._run(("remote", "set-url", "origin", origin_url), destination_path)
+        else:
+            self._run(("remote", "remove", "origin"), destination_path)
+        return destination_path
+
     def create_worktree(self, repository: str | Path, worktree: str | Path, branch: str) -> Path:
         repo_path = Path(repository).resolve()
         if not repo_path.is_relative_to(self.workspace_root):
@@ -103,7 +149,27 @@ class GitTools:
         return self._run(("status", "--short"), Path(worktree))
 
     def diff(self, worktree: str | Path) -> str:
-        return self._run(("diff", "--no-ext-diff", "--", "."), Path(worktree))
+        return self._run(("diff", "--cached", "--no-ext-diff", "--", "."), Path(worktree))
+
+    def stage_paths(self, worktree: str | Path, paths: tuple[str, ...]) -> None:
+        if not paths:
+            raise GitToolError("No implementation paths to stage")
+        for path in paths:
+            candidate = Path(path)
+            if candidate.is_absolute() or ".." in candidate.parts or "\\" in path:
+                raise GitToolError(f"Invalid file path to stage: {path}")
+        self._run(("add", "--", *paths), Path(worktree))
+
+    def push_branch(self, worktree: str | Path, branch: str) -> None:
+        if not re.fullmatch(r"agent/[a-zA-Z0-9._-]{1,80}", branch):
+            raise GitToolError(f"Invalid isolated branch name: {branch}")
+        self._run(("push", "--set-upstream", "origin", branch), Path(worktree))
+
+    def commit_changes(self, worktree: str | Path, message: str) -> str:
+        if not message or len(message) > 100:
+            raise GitToolError("Commit message must be between 1 and 100 characters")
+        self._run(("commit", "-m", message), Path(worktree))
+        return self._run(("rev-parse", "--short", "HEAD"), Path(worktree)).strip()
 
     def branch_name(self, worktree: str | Path) -> str:
         return self._run(("branch", "--show-current"), Path(worktree)).strip()
