@@ -1,5 +1,7 @@
 # Architecture and acceptance plan
 
+See [roadmap.md](roadmap.md) for the staged plan covering pgvector, token efficiency, evaluation, queues, and MCP.
+
 ## Purpose
 
 Build a local-first software-engineering workflow that coordinates planning, code changes, tests, review, and a final report. It supports a deterministic fixture provider and a local Ollama provider. Model prompts and repository context stay on the machine.
@@ -11,11 +13,14 @@ Build a local-first software-engineering workflow that coordinates planning, cod
 - `service.py`: shared CLI/dashboard workflow service.
 - `core.models`: typed task, role-contract, step-status, and result records.
 - `core.context`: SQLite task and step history, persisted across runs.
+- `core.rag`: local source indexing, chunking, BM25 retrieval, and retrieval coverage evaluation in SQLite.
 - `core.engine`: explicit workflow state machine and failure reporting.
 - `roles`: separate planner, executor, and reviewer interfaces, with demo and local Ollama providers.
 - `tools.git_tools`: isolated Git worktree and branch operations with status/diff inspection.
 - `tools.runner`: fixed command profiles, path containment, timeout, and bounded output.
 - `fixtures/buggy_project`: disposable regression target for the first scenario.
+
+RAG indexes allowlisted text/code files, skips symlinks and common generated/secret files, refreshes changed chunks, and stores a hash of a Git origin instead of its URL. Retrieval is local BM25 with a query-term coverage evaluator; it does not yet use embedding vectors or an LLM judge.
 
 ## Trust boundaries
 

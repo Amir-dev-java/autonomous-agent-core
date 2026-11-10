@@ -29,7 +29,10 @@ class WorkflowService:
         if self.config.provider == "demo":
             provider = DemoProvider()
         elif self.config.provider == "ollama":
-            provider = OllamaProvider(self.config.model, self.config.model_base_url)
+            provider = OllamaProvider(
+                self.config.model, self.config.model_base_url,
+                rag_database=self.config.database,
+            )
         else:
             raise ValueError(f"Unsupported local provider: {self.config.provider}")
         git = GitTools(self.config.workspace_root)
