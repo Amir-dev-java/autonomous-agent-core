@@ -7,6 +7,7 @@ import os
 import urllib.error
 import urllib.request
 from pathlib import Path
+from pathlib import PurePosixPath
 from urllib.parse import urlsplit
 
 from core.models import FileEdit, Implementation, Plan, Review, TaskRequest, TestResult
@@ -113,6 +114,11 @@ class OllamaProvider:
         expected_files = self._string_list(result, "expected_files", 80)
         if not expected_files:
             raise ValueError("The local planner must name at least one file to change")
+        for path in expected_files:
+            relative = PurePosixPath(path)
+            if (relative.is_absolute() or ".." in relative.parts or "\\" in path
+                    or ":" in path or not relative.parts):
+                raise ValueError(f"Planner returned an unsafe file path: {path}")
         return Plan(
             self._text(result, "summary", 2000),
             tuple(self._string_list(result, "steps", 20)),
@@ -191,12 +197,39 @@ class OllamaProvider:
     @classmethod
     def _string_list(cls, result: dict, name: str, limit: int) -> list[str]:
         values = result.get(name)
+        if isinstance(values, str):
+            candidate = values.strip()
+            if candidate.startswith("```") and candidate.endswith("```"):
+                candidate = candidate.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+            try:
+                decoded = json.loads(candidate)
+            except json.JSONDecodeError:
+                decoded = None
+            if isinstance(decoded, (list, dict)):
+                values = decoded
+            else:
+                values = [line.strip().lstrip("-*• ").strip(" `\"'")
+                          for line in candidate.replace(",", "\n").splitlines() if line.strip()]
+        if isinstance(values, dict):
+            for key in (name, "items", "files", "paths", "values"):
+                if key in values:
+                    values = values[key]
+                    break
+            else:
+                raise ValueError(f"Model field '{name}' must contain a list, string, or files/items object")
+        if values is None:
+            values = []
         if not isinstance(values, list) or len(values) > limit:
             raise ValueError(f"Model field '{name}' must be an array with at most {limit} items")
         normalized = []
         for value in values:
             if isinstance(value, str):
                 item = value
+            elif isinstance(value, dict) and name == "expected_files":
+                item = next((value[key] for key in ("path", "file", "name")
+                             if isinstance(value.get(key), str)), None)
+                if item is None:
+                    raise ValueError("Each expected_files item must name a file path")
             elif isinstance(value, (dict, list)):
                 item = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
             else:
