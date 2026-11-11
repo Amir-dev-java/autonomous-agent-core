@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 import sys
+from unittest.mock import patch
 
 from tools.runner import RunnerError, SafeRunner
 
@@ -40,6 +41,41 @@ class SafeRunnerTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as temp:
                 result = SafeRunner(temp, max_output_bytes=128).run("_test_output", temp)
                 self.assertLessEqual(len(result.stdout.encode("utf-8")), 128)
+        finally:
+            SafeRunner.PROFILES = original
+
+    def test_pytest_profile_is_registered_and_missing_dependency_is_reported(self):
+        self.assertEqual(SafeRunner.PROFILES["pytest"][:3], (sys.executable, "-m", "pytest"))
+        with tempfile.TemporaryDirectory() as temp, patch("tools.runner.importlib.util.find_spec", return_value=None):
+            result = SafeRunner(temp).run("pytest", temp)
+        self.assertFalse(result.passed)
+        self.assertIn("pytest is not installed", result.stderr)
+
+    def test_java_profiles_are_fixed_and_offline(self):
+        self.assertIn("--offline", SafeRunner.PROFILES["maven"])
+        self.assertEqual(SafeRunner.PROFILES["maven"][-1], "test")
+        self.assertIn("--offline", SafeRunner.PROFILES["gradle"])
+        self.assertEqual(SafeRunner.PROFILES["gradle"][-1], "test")
+
+    def test_missing_maven_is_reported_without_shell_fallback(self):
+        with tempfile.TemporaryDirectory() as temp, patch("tools.runner.shutil.which", return_value=None):
+            result = SafeRunner(temp).run("maven", temp)
+        self.assertFalse(result.passed)
+        self.assertEqual(result.returncode, 127)
+        self.assertIn("not installed", result.stderr)
+
+    def test_runner_does_not_forward_arbitrary_environment_secrets(self):
+        profile = "_test_clean_environment"
+        original = SafeRunner.PROFILES
+        try:
+            SafeRunner.PROFILES = {
+                **original,
+                profile: (sys.executable, "-c", "import os; print(os.getenv('AGENT_TEST_SECRET', 'missing'))"),
+            }
+            with tempfile.TemporaryDirectory() as temp, patch.dict("os.environ", {"AGENT_TEST_SECRET": "secret"}):
+                result = SafeRunner(temp).run(profile, temp)
+            self.assertTrue(result.passed, result.stderr)
+            self.assertEqual(result.stdout.strip(), "missing")
         finally:
             SafeRunner.PROFILES = original
 

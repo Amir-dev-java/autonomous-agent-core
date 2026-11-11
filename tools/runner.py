@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import importlib.util
+import shutil
 import subprocess
 import sys
 import threading
@@ -18,6 +20,9 @@ class RunnerError(RuntimeError):
 class SafeRunner:
     PROFILES = {
         "unit": (sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"),
+        "pytest": (sys.executable, "-m", "pytest", "-q"),
+        "maven": ("mvn", "--offline", "--batch-mode", "test"),
+        "gradle": ("gradle", "--offline", "--no-daemon", "test"),
         "demo_regression": (
             sys.executable, "-m", "unittest", "discover", "-s", "tests",
             "-p", "test_regression.py", "-v",
@@ -42,15 +47,34 @@ class SafeRunner:
         if not directory.is_dir():
             raise RunnerError(f"Working directory does not exist: {directory}")
 
+        if profile == "pytest" and importlib.util.find_spec("pytest") is None:
+            return TestResult(
+                False, 127, "", "pytest is not installed in the configured Python environment",
+                command,
+            )
+        if command[0] not in {sys.executable, "python", "python3"}:
+            executable = shutil.which(command[0])
+            if executable is None:
+                return TestResult(
+                    False, 127, "", f"Required test tool '{command[0]}' is not installed", command,
+                )
+            command = (executable, *command[1:])
+
         env = {"PYTHONIOENCODING": "utf-8"}
         if os.name == "nt":
             env["SYSTEMROOT"] = os.environ.get("SYSTEMROOT", "")
-        process = subprocess.Popen(
-            command, cwd=directory, stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False, env=env,
-            close_fds=True,
-            **({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {}),
-        )
+            env["TEMP"] = os.environ.get("TEMP", "")
+            env["TMP"] = os.environ.get("TMP", "")
+        env["PATH"] = os.environ.get("PATH", "")
+        try:
+            process = subprocess.Popen(
+                command, cwd=directory, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False, env=env,
+                close_fds=True,
+                **({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {}),
+            )
+        except OSError as exc:
+            return TestResult(False, 127, "", f"Could not start test tool: {exc}", command)
         captured = {"stdout": bytearray(), "stderr": bytearray()}
 
         def drain(pipe, key: str) -> None:

@@ -8,6 +8,7 @@ This roadmap builds on the current Python, Ollama, isolated-worktree workflow. T
 - Isolated Git worktree per task, bounded test runner, review, and explicit publishing.
 - SQLite task history and lexical BM25 RAG with incremental source indexing.
 - Retrieval coverage is reported, but this is not yet a semantic relevance evaluator.
+- The current executor already uses bounded search/replace edits; whole-file rewrites should remain disallowed by default.
 
 ## Planned stages
 
@@ -18,7 +19,7 @@ This roadmap builds on the current Python, Ollama, isolated-worktree workflow. T
 - Generate embeddings through a configurable local Ollama embedding model; never silently send source code to a remote embedding API.
 - Store repository, revision, path, chunk boundaries, content hash, and embedding model/version with each vector. Incrementally re-embed changed chunks and remove stale chunks.
 - Use hybrid retrieval (BM25 plus vector similarity), repository and file filters, deduplication, and a strict context token budget.
-- Evaluate with a small versioned set of repository questions and relevant-file labels. Track Recall@k, MRR/nDCG, query coverage, retrieval latency, and prompt token count. Compare changes against the BM25 baseline.
+- Expand `fixtures/` with distinct bug classes and keep a versioned set of repository questions with relevant-file labels. Track task success rate per model and prompt, plus Recall@k, MRR/nDCG, query coverage, retrieval latency, retries, and prompt token count. Compare every change against a fixed baseline.
 
 ### 2. Independent evaluator
 
@@ -35,20 +36,27 @@ This roadmap builds on the current Python, Ollama, isolated-worktree workflow. T
 - Use model-aware token counting when available, with a conservative fallback estimate. Never treat a character limit as an exact token limit.
 - Measure tokens per successful task, retries, latency, and acceptance rate. Require evaluator quality to stay stable or improve as token use falls.
 
-### 4. Durable task queue and workers
+### 4. Bounded repair and test runner
+
+- Feed test failures and reviewer findings back to the implementation role with a hard maximum of three attempts. Persist each attempt and stop clearly when the limit is reached.
+- Preserve structured search/replace edits or adopt validated unified-diff hunks; reject ambiguous matches and avoid whole-file rewrites for small local models.
+- Add `pytest` as a registered test profile, then add restricted Maven and Gradle profiles for Java repositories. Do not let the model choose arbitrary commands.
+- Run tests with a minimal environment and no network access where the host OS can enforce it. Report when the requested isolation cannot be enforced; a clean environment alone is not network isolation.
+
+### 5. Durable task queue and workers
 
 - Change intake to persist a queued task and return immediately.
 - Add worker leases, bounded retries, cancellation, per-repository concurrency limits, and recovery after process restart.
 - Expose stage progress to the dashboard without holding the HTTP request open.
 - Tune worker count against actual GPU/VRAM usage and queue latency; multiple roles should share one local model service where possible.
 
-### 5. MCP integration
+### 6. MCP integration
 
 - Add an MCP client for explicitly configured local tools the agent needs.
 - Offer a separate MCP server only for a narrow, allowlisted set of project operations.
 - Validate tool arguments and results, enforce per-tool permissions and timeouts, and record every invocation. No unrestricted shell or filesystem tool by default.
 
-### 6. Git delivery and operations
+### 7. Git delivery and operations
 
 - Keep task branches isolated and publishing explicit.
 - Add pull-request creation only after branch, test, review, and evaluator evidence are visible to the user.
@@ -57,6 +65,7 @@ This roadmap builds on the current Python, Ollama, isolated-worktree workflow. T
 ## Constraints and decision gates
 
 - Local inference and embeddings are the default. Any remote provider must be an explicit user-configured option with clear data-flow boundaries.
+- Treat repository content as untrusted prompt input. Keep prompt-injection defenses, path checks, test gates, and independent review; never accept a reviewer verdict without validating its schema and test evidence.
 - Do not introduce PostgreSQL, Redis, vLLM, or additional model downloads until the stage needs them and the machine can run them. pgvector is a planned vector-store target, not a current runtime dependency.
 - Keep small interfaces around model providers, vector stores, and workers so each can be replaced without rewriting workflow policy.
 - Optimize for measured task success and token cost together; a shorter prompt that lowers correctness is a regression.

@@ -21,6 +21,7 @@ class WorkflowStageError(RuntimeError):
 
 
 class WorkflowEngine:
+    MAX_ATTEMPTS = 3
     STAGES = ("repository", "planning", "worktree", "implementation", "staging",
               "tests", "review", "commit")
 
@@ -59,31 +60,121 @@ class WorkflowEngine:
                 lambda value: {"path": str(value), "branch": self.git.branch_name(value)},
             )
             paths["worktree"] = str(worktree)
-            implementation = self._stage(
-                task_id, "implementation",
-                lambda: self._implement_with_retry(request, plan, worktree),
-                lambda value: {"explanation": value.explanation,
-                               "files": [edit.path for edit in value.edits]},
+            feedback = ""
+            changed_paths: set[str] = set()
+            last_failure_kind = "implementation"
+            last_failure = "No implementation attempt was completed"
+            implementation = None
+            test_result = None
+            review = None
+            completed = False
+            for attempt in range(1, self.MAX_ATTEMPTS + 1):
+                attempt_name = f"{attempt}"
+                generation_request = TaskRequest(
+                    request.objective + feedback, str(worktree), task_id
+                )
+                implementation = self._stage(
+                    task_id, f"implementation_attempt_{attempt_name}",
+                    lambda: self.executor.implement(generation_request, plan),
+                    lambda value: {"explanation": value.explanation,
+                                   "files": [edit.path for edit in value.edits]},
+                )
+                try:
+                    self._stage(
+                        task_id, f"patch_attempt_{attempt_name}",
+                        lambda: self._apply_implementation(implementation, plan, worktree, request),
+                        lambda value: {"files": [edit.path for edit in value.edits]},
+                    )
+                except WorkflowStageError as exc:
+                    last_failure_kind = "implementation"
+                    last_failure = str(exc)
+                    feedback = (
+                        f"\n\nRepair feedback: patch attempt {attempt} was rejected. "
+                        f"Correct the patch against the current worktree. Error: {last_failure}"
+                    )
+                    continue
+                changed_paths.update(edit.path for edit in implementation.edits)
+
+                test_result = self._stage(
+                    task_id, f"tests_attempt_{attempt_name}",
+                    lambda: self.runner.run(plan.test_profile, worktree),
+                    lambda value: {"passed": value.passed, "returncode": value.returncode,
+                                   "stdout": value.stdout, "stderr": value.stderr,
+                                   "command": list(value.command)},
+                )
+                if not test_result.passed:
+                    last_failure_kind = "tests"
+                    last_failure = (
+                        test_result.stderr or test_result.stdout
+                        or f"test process exited {test_result.returncode}"
+                    )[-12000:]
+                    self.context.record_step(
+                        task_id, f"tests_attempt_{attempt_name}", StepStatus.FAILED,
+                        last_failure, {"passed": False, "returncode": test_result.returncode,
+                                       "stdout": test_result.stdout, "stderr": test_result.stderr,
+                                       "command": list(test_result.command)},
+                    )
+                    feedback = (
+                        f"\n\nRepair feedback: tests failed on attempt {attempt}. "
+                        f"Use this output to fix the implementation; preserve the requested behavior.\n"
+                        f"{last_failure}"
+                    )
+                    continue
+
+                self._stage(
+                    task_id, f"staging_attempt_{attempt_name}",
+                    lambda: self.git.stage_paths(worktree, tuple(sorted(changed_paths))),
+                    lambda _value: {"files": sorted(changed_paths)},
+                )
+                review = self._stage(
+                    task_id, f"review_attempt_{attempt_name}",
+                    lambda: self._review(worktree, request, plan, implementation, test_result),
+                    lambda value: {"approved": value.approved, "findings": list(value.findings)},
+                )
+                if not review.approved:
+                    last_failure_kind = "review"
+                    last_failure = "; ".join(review.findings) or "review rejected"
+                    self.context.record_step(
+                        task_id, f"review_attempt_{attempt_name}", StepStatus.FAILED,
+                        last_failure, {"approved": False, "findings": list(review.findings)},
+                    )
+                    feedback = (
+                        f"\n\nRepair feedback: independent review rejected attempt {attempt}. "
+                        f"Address these findings without weakening tests or changing unrelated code: "
+                        f"{last_failure}"
+                    )
+                    continue
+
+                completed = True
+                break
+
+            if not completed:
+                final_reason = f"{last_failure_kind} failed after {self.MAX_ATTEMPTS} attempts: {last_failure}"
+                self.context.record_step(
+                    task_id, last_failure_kind, StepStatus.FAILED, final_reason,
+                    {"attempts": self.MAX_ATTEMPTS},
+                )
+                raise WorkflowStageError(final_reason)
+
+            assert implementation is not None and test_result is not None and review is not None
+            self.context.record_step(
+                task_id, "implementation", StepStatus.SUCCEEDED,
+                payload={"explanation": implementation.explanation,
+                         "files": sorted(changed_paths)},
             )
-            self._stage(
-                task_id, "staging",
-                lambda: self.git.stage_paths(worktree, tuple(edit.path for edit in implementation.edits)),
-                lambda _value: {"files": [edit.path for edit in implementation.edits]},
+            self.context.record_step(
+                task_id, "staging", StepStatus.SUCCEEDED,
+                payload={"files": sorted(changed_paths)},
             )
-            test_result = self._stage(
-                task_id, "tests", lambda: self.runner.run(plan.test_profile, worktree),
-                lambda value: {"passed": value.passed, "returncode": value.returncode,
-                               "stdout": value.stdout, "stderr": value.stderr,
-                               "command": list(value.command)},
-                success=lambda result: result.passed,
-                failure_reason=lambda result: result.stderr or f"test process exited {result.returncode}",
+            self.context.record_step(
+                task_id, "tests", StepStatus.SUCCEEDED,
+                payload={"passed": True, "returncode": test_result.returncode,
+                         "stdout": test_result.stdout, "stderr": test_result.stderr,
+                         "command": list(test_result.command)},
             )
-            review: Review = self._stage(
-                task_id, "review",
-                lambda: self._review(worktree, request, plan, implementation, test_result),
-                lambda value: {"approved": value.approved, "findings": list(value.findings)},
-                success=lambda result: result.approved,
-                failure_reason=lambda result: "; ".join(result.findings) or "review rejected",
+            self.context.record_step(
+                task_id, "review", StepStatus.SUCCEEDED,
+                payload={"approved": True, "findings": list(review.findings)},
             )
             commit = self._stage(
                 task_id, "commit",
@@ -128,27 +219,6 @@ class WorkflowEngine:
             reason = f"{type(exc).__name__}: {exc}"
             self.context.record_step(task_id, name, StepStatus.FAILED, reason)
             raise WorkflowStageError(f"{name} failed: {reason}") from exc
-
-    def _implement_with_retry(self, request, plan, worktree):
-        feedback = ""
-        for attempt in range(2):
-            generation_request = TaskRequest(
-                request.objective + feedback, request.repository, request.task_id
-            )
-            implementation = self.executor.implement(generation_request, plan)
-            try:
-                self._apply_implementation(implementation, plan, worktree, request)
-                return implementation
-            except ValueError as exc:
-                if attempt or not str(exc).startswith("Expected one exact match"):
-                    raise
-                feedback = (
-                    "\n\nCorrection for the previous draft: it was rejected because its old_text "
-                    "matched multiple locations. Regenerate the edits with a longer exact old_text "
-                    "that includes the relevant class/function declaration and surrounding lines, "
-                    "so each edit matches exactly once. Do not change unrelated functions."
-                )
-        raise RuntimeError("Could not generate a unique patch")
 
     def _apply_implementation(self, implementation, plan, worktree, request):
         expected = set(plan.expected_files)
@@ -200,7 +270,18 @@ class WorkflowEngine:
         for target, content in writes:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
+            if target.suffix.lower() == ".py":
+                self._invalidate_python_cache(target)
         return implementation
+
+    @staticmethod
+    def _invalidate_python_cache(source: Path) -> None:
+        cache_dir = source.parent / "__pycache__"
+        if not cache_dir.is_dir() or cache_dir.is_symlink():
+            return
+        for cached in cache_dir.glob(source.stem + ".*.pyc"):
+            if cached.is_file() and not cached.is_symlink():
+                cached.unlink(missing_ok=True)
 
     @staticmethod
     def _scoped_match(source: str, old_text: str, objective: str, plan_text: str) -> int | None:
